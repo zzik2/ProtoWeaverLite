@@ -10,6 +10,7 @@ import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioSocketChannel;
 import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslContextBuilder;
+import io.netty.handler.ssl.SslHandler;
 import lombok.Getter;
 import lombok.NonNull;
 import me.mrnavastar.protoweaver.api.ProtoWeaver;
@@ -21,7 +22,9 @@ import me.mrnavastar.protoweaver.client.netty.ProtoTrustManager;
 import me.mrnavastar.protoweaver.core.protocol.protoweaver.ClientConnectionHandler;
 import me.mrnavastar.protoweaver.core.protocol.protoweaver.InternalConnectionHandler;
 
+import javax.net.ssl.SSLEngine;
 import javax.net.ssl.SSLException;
+import javax.net.ssl.SSLParameters;
 import java.net.InetSocketAddress;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -47,8 +50,7 @@ public class ProtoClient {
         try {
             this.address = address;
             trustManager = new ProtoTrustManager(address.getHostName(), address.getPort(), hostsFile);
-            // Server identity is verified by its saved fingerprint, not the self-signed certificate's hostname.
-            this.sslContext = SslContextBuilder.forClient().trustManager(trustManager).endpointIdentificationAlgorithm(null).build();
+            this.sslContext = SslContextBuilder.forClient().trustManager(trustManager).build();
         } catch (SSLException e) {
             throw new RuntimeException(e);
         }
@@ -80,7 +82,14 @@ public class ProtoClient {
         b.handler(new ChannelInitializer<SocketChannel>() {
             @Override
             public void initChannel(@NonNull SocketChannel ch) throws Exception {
-                ch.pipeline().addLast("ssl", sslContext.newHandler(ch.alloc(), address.getHostName(), address.getPort()));
+                SslHandler sslHandler = sslContext.newHandler(ch.alloc(), address.getHostName(), address.getPort());
+                SSLEngine engine = sslHandler.engine();
+                SSLParameters parameters = engine.getSSLParameters();
+                // Use fingerprint authentication. null would preserve existing JDK hostname verification.
+                parameters.setEndpointIdentificationAlgorithm("");
+                engine.setSSLParameters(parameters);
+
+                ch.pipeline().addLast("ssl", sslHandler);
                 connection = new ProtoConnection(InternalConnectionHandler.getProtocol(), Side.CLIENT, ch);
             }
         });
