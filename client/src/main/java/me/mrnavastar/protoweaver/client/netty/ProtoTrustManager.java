@@ -84,7 +84,7 @@ public class ProtoTrustManager implements X509TrustManager {
                 hostsFile.createNewFile();
 
                 @Cleanup BufferedWriter writer = new BufferedWriter(new FileWriter(hostsFile, true));
-                writer.append(hostId).append("=").append(StringUtil.toHexString(actual)).append("\n");
+                writer.append(hostId).append("=").append(StringUtil.toHexStringPadded(actual)).append("\n");
                 trusted = Arrays.copyOf(actual, actual.length);
                 return;
             }
