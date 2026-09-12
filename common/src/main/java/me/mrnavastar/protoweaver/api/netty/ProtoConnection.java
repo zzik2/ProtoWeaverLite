@@ -6,11 +6,10 @@ import io.netty.handler.codec.compression.*;
 import lombok.Getter;
 import lombok.NonNull;
 import me.mrnavastar.protoweaver.api.ProtoConnectionHandler;
-import me.mrnavastar.protoweaver.api.protocol.CompressionType;
 import me.mrnavastar.protoweaver.api.protocol.Protocol;
 import me.mrnavastar.protoweaver.api.protocol.Side;
 import me.mrnavastar.protoweaver.core.netty.ProtoPacketHandler;
-import me.mrnavastar.protoweaver.core.util.ProtoLogger;
+import me.mrnavastar.protoweaver.core.protocol.protoweaver.ServerConnectionHandler;
 
 import java.net.InetSocketAddress;
 import java.util.Objects;
@@ -27,13 +26,13 @@ public class ProtoConnection {
     private final Channel channel;
     private final ChannelPipeline pipeline;
     @Getter
-    private ProtoConnectionHandler handler;
+    private volatile ProtoConnectionHandler handler;
 
     /**
      * Get the connections current protocol.
      */
     @Getter
-    private Protocol protocol;
+    private volatile Protocol protocol;
 
     /**
      * Get the side that this connection is on. Always returns {@link Side#CLIENT} on client and {@link Side#SERVER} on server.
@@ -57,14 +56,12 @@ public class ProtoConnection {
         this.channel = channel;
         this.pipeline = channel.pipeline();
 
+        if (side == Side.SERVER) connectionCount.merge(protocol.toString(), 1, Integer::sum);
         pipeline.addLast("packetHandler", packetHandler);
         setCompression(protocol);
     }
 
     private void setCompression(@NonNull Protocol protocol) {
-        CompressionType compression = this.protocol.getCompression();
-        if (protocol.getCompression().equals(compression)) return;
-
         if (pipeline.names().contains("compressionEncoder")) {
             pipeline.remove("compressionEncoder");
             pipeline.remove("compressionDecoder");
@@ -93,18 +90,29 @@ public class ProtoConnection {
      * @param protocol The protocol the connection will switch to.
      */
     public void upgradeProtocol(@NonNull Protocol protocol) {
+        if (!isOpen()) return;
         try {
-            setCompression(protocol);
-            this.handler = protocol.newConnectionHandler(side);
-            connectionCount.put(protocol.toString(), connectionCount.getOrDefault(protocol.toString(), 1) - 1);
-            this.protocol = protocol;
-            connectionCount.put(protocol.toString(), connectionCount.getOrDefault(protocol.toString(), 0) + 1);
-            packetHandler.setHandler(handler);
+            ProtoConnectionHandler nextHandler = protocol.newConnectionHandler(side);
+            synchronized (protocol) {
+                if (handler instanceof ServerConnectionHandler handshake && !handshake.confirmUpgrade(this, protocol)) return;
+
+                if (this.protocol.getCompression() != protocol.getCompression() || this.protocol.getCompressionLevel() != protocol.getCompressionLevel()) {
+                    setCompression(protocol);
+                }
+                if (side == Side.SERVER) {
+                    connectionCount.computeIfPresent(this.protocol.toString(), (name, count) -> count <= 1 ? null : count - 1);
+                    connectionCount.merge(protocol.toString(), 1, Integer::sum);
+                }
+                this.handler = nextHandler;
+                this.protocol = protocol;
+                packetHandler.setHandler(handler);
+            }
 
             this.handler.onReady(this);
         } catch (Exception e) {
             protocol.logErr("Threw an error on initialization!");
             e.printStackTrace();
+            disconnect();
         }
     }
 
@@ -143,8 +151,9 @@ public class ProtoConnection {
      * Closes the connection if it is open. Calling this function on a closed connection does nothing.
      */
     public void disconnect() {
-        if (isOpen()) channel.close();
+        if (!isOpen()) return;
         disconnecter = side;
+        channel.close();
     }
 
     @Override

@@ -1,39 +1,33 @@
 package me.mrnavastar.protoweaver.core.netty;
 
 import io.netty.buffer.ByteBuf;
-import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.handler.codec.ByteToMessageDecoder;
 import lombok.Setter;
 import me.mrnavastar.protoweaver.api.ProtoConnectionHandler;
 import me.mrnavastar.protoweaver.api.netty.ProtoConnection;
 import me.mrnavastar.protoweaver.api.netty.Sender;
+import me.mrnavastar.protoweaver.api.protocol.CompressionType;
 import me.mrnavastar.protoweaver.api.protocol.Side;
-import me.mrnavastar.protoweaver.core.util.DrunkenBishop;
 import me.mrnavastar.protoweaver.core.util.ProtoConstants;
-import me.mrnavastar.protoweaver.core.util.ProtoLogger;
 
-import java.net.SocketException;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 
 public class ProtoPacketHandler extends ByteToMessageDecoder {
 
-    private static ConcurrentHashMap<String, Integer> connectionCount;
+    private final ConcurrentHashMap<String, Integer> connectionCount;
 
     private final ProtoConnection connection;
     @Setter
     private ProtoConnectionHandler handler;
     private ChannelHandlerContext ctx;
-    private ByteBuf buf = Unpooled.buffer();
+    private boolean sendHeader;
 
     public ProtoPacketHandler(ProtoConnection connection, ConcurrentHashMap<String, Integer> connectionCount) {
         this.connection = connection;
-        ProtoPacketHandler.connectionCount = connectionCount;
-        if (connection.getSide().equals(Side.CLIENT)) {
-            buf.writeByte(0); // Fake out minecraft packet len
-            buf.writeByte(ProtoConstants.PROTOWEAVER_MAGIC_BYTE);
-        }
+        this.connectionCount = connectionCount;
+        this.sendHeader = connection.getSide() == Side.CLIENT;
     }
 
     @Override
@@ -42,13 +36,19 @@ public class ProtoPacketHandler extends ByteToMessageDecoder {
     }
 
     @Override
-    public void channelInactive(ChannelHandlerContext ctx) {
+    public void channelInactive(ChannelHandlerContext ctx) throws Exception {
         try {
-            connectionCount.put(connection.getProtocol().toString(), connectionCount.getOrDefault(connection.getProtocol().toString(), 1) - 1);
-            this.handler.onDisconnect(connection);
-        } catch (Exception e) {
-            connection.getProtocol().logErr("Threw an error on disconnect!");
-            e.printStackTrace();
+            super.channelInactive(ctx);
+        } finally {
+            if (connection.getSide() == Side.SERVER) {
+                connectionCount.computeIfPresent(connection.getProtocol().toString(), (name, count) -> count <= 1 ? null : count - 1);
+            }
+            try {
+                this.handler.onDisconnect(connection);
+            } catch (Exception e) {
+                connection.getProtocol().logErr("Threw an error on disconnect!");
+                e.printStackTrace();
+            }
         }
     }
 
@@ -58,12 +58,19 @@ public class ProtoPacketHandler extends ByteToMessageDecoder {
         if (byteBuf.readableBytes() < 4) return;
         byteBuf.markReaderIndex();
         int packetLen = byteBuf.readInt();
+        if (packetLen <= 0 || packetLen > connection.getProtocol().getMaxPacketSize()) {
+            connection.getProtocol().logWarn("Invalid packet length: " + packetLen);
+            byteBuf.skipBytes(byteBuf.readableBytes());
+            ctx.close();
+            return;
+        }
         if (byteBuf.readableBytes() < packetLen) {
             byteBuf.resetReaderIndex();
             return;
         }
 
         Object packet = null;
+        CompressionType previousCompression = connection.getProtocol().getCompression();
         try {
             byte[] bytes = new byte[packetLen];
             byteBuf.readBytes(bytes);
@@ -75,21 +82,33 @@ public class ProtoPacketHandler extends ByteToMessageDecoder {
         } catch (Exception e) {
             if (packet != null) connection.getProtocol().logErr("Threw an error when trying to handle: " + packet.getClass() + "!");
             e.printStackTrace();
+        } finally {
+            // Bytes following the upgrade may already be buffered before the compression decoder is installed.
+            if (previousCompression == CompressionType.NONE && connection.getProtocol().getCompression() != CompressionType.NONE
+                    && ctx.channel().isOpen() && byteBuf.isReadable()) {
+                ctx.pipeline().context("compressionEncoder").fireChannelRead(byteBuf.readRetainedSlice(byteBuf.readableBytes()));
+            }
         }
     }
 
-    // Done with two bufs to prevent the user from messing with the internal data
-    public Sender send(Object packet) {
+    public synchronized Sender send(Object packet) {
         try {
             byte[] packetBuf = connection.getProtocol().serialize(packet);
             if (packetBuf.length == 0) return new Sender(connection, ctx.newSucceededFuture(), false);
+            if (packetBuf.length > connection.getProtocol().getMaxPacketSize()) {
+                throw new IllegalArgumentException("oversized packet: " + packetBuf.length);
+            }
 
+            ByteBuf buf = ctx.alloc().buffer(packetBuf.length + (sendHeader ? 6 : 4));
+            if (sendHeader) {
+                buf.writeByte(0);
+                buf.writeByte(ProtoConstants.PROTOWEAVER_MAGIC_BYTE);
+                sendHeader = false;
+            }
             buf.writeInt(packetBuf.length); // Packet Len
             buf.writeBytes(packetBuf);
 
-            Sender sender = new Sender(connection, ctx.writeAndFlush(buf), true);
-            buf = Unpooled.buffer();
-            return sender;
+            return new Sender(connection, ctx.writeAndFlush(buf), true);
 
         } catch (IllegalArgumentException e) {
             connection.getProtocol().logErr("Tried to send an " + e.getMessage());
@@ -103,30 +122,7 @@ public class ProtoPacketHandler extends ByteToMessageDecoder {
 
     @Override
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
-        String message = cause.getMessage();
-        String[] parts = message.split(":");
-
-        if (parts[1].contains("protoweaver-client-cert-error")) {
-            String[] fingerprints = parts[4].split("!=");
-
-            ProtoLogger.warn(" Saved Fingerprint:     Server Fingerprint:");
-            String images = DrunkenBishop.inlineImages(DrunkenBishop.parse(fingerprints[0]), DrunkenBishop.parse(fingerprints[1]));
-            for (String line : images.split("\n")) {
-                ProtoLogger.warn(line);
-            }
-
-            ProtoLogger.err("Failed to connect to: " + parts[2] + ":" + parts[3]);
-            ProtoLogger.err("Server SSL fingerprint does not match saved fingerprint! This could be a MITM ATTACK!");
-            ProtoLogger.err(" - https://en.wikipedia.org/wiki/Man-in-the-middle_attack");
-            ProtoLogger.err("If you've reset your server configuration recently, you can probably ignore this and reset/remove the \"protoweaver.hosts\" file.");
-
-            ctx.close();
-            connection.disconnect();
-        }
-
-        if (cause instanceof SocketException) {
-            ctx.close();
-            connection.disconnect();
-        }
+        connection.getProtocol().logWarn("Connection error: " + cause);
+        ctx.close();
     }
 }

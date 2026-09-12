@@ -5,7 +5,10 @@ import me.mrnavastar.protoweaver.api.ProtoSerializer;
 import me.mrnavastar.r.R;
 import org.apache.fory.Fory;
 import org.apache.fory.config.CompatibleMode;
+import org.apache.fory.config.Config;
 import org.apache.fory.config.Language;
+import org.apache.fory.context.ReadContext;
+import org.apache.fory.context.WriteContext;
 import org.apache.fory.exception.InsecureException;
 import org.apache.fory.logging.LoggerFactory;
 import org.apache.fory.memory.MemoryBuffer;
@@ -23,28 +26,31 @@ public class ObjectSerializer {
 
         private final ProtoSerializer<T> serializer;
 
-        public SerializerAdapter(Fory fury, Class<T> type, ProtoSerializer<T> serializer) {
-            super(fury, type);
+        public SerializerAdapter(Config config, Class<T> type, ProtoSerializer<T> serializer) {
+            super(config, type);
             this.serializer = serializer;
         }
 
         @Override
-        public T read(MemoryBuffer buffer) {
-            ByteArrayInputStream in = new ByteArrayInputStream(buffer.getRemainingBytes());
+        public T read(ReadContext readContext) {
+            MemoryBuffer buffer = readContext.getBuffer();
+            // Fory 1.7.0's readBytesAndSize() does not advance past lengths encoded in 3+ bytes.
+            ByteArrayInputStream in = new ByteArrayInputStream(buffer.readBytes(buffer.readVarUInt32()));
             return serializer.read(in);
         }
 
         @Override
-        public void write(MemoryBuffer buffer, T value) {
+        public void write(WriteContext writeContext, T value) {
             ByteArrayOutputStream out = new ByteArrayOutputStream();
             serializer.write(out, value);
-            buffer.writeBytes(out.toByteArray());
+
+            writeContext.getBuffer().writeBytesWithSize(out.toByteArray());
         }
     }
 
     private final Fory fury = Fory.builder()
             .withJdkClassSerializableCheck(false)
-            .withDeserializeNonexistentClass(false)
+            .withDeserializeUnknownClass(false)
             .withLanguage(Language.JAVA)
             .withCompatibleMode(CompatibleMode.COMPATIBLE)
             .withAsyncCompilation(true)
@@ -75,7 +81,7 @@ public class ObjectSerializer {
     @SneakyThrows
     public <T> void register(Class<T> type, ProtoSerializer<T> serializer) {
         synchronized (fury) {
-            fury.registerSerializer(type, new SerializerAdapter<>(fury, type, serializer));
+            fury.registerSerializer(type, new SerializerAdapter<>(fury.getConfig(), type, serializer));
         }
     }
 

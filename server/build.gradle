@@ -1,6 +1,8 @@
 apply plugin: "com.gradleup.shadow"
 
 dependencies {
+    testImplementation files(project(':client').sourceSets.main.output)
+
     shadow implementation(project(path: ':common', configuration: 'default'))
 
     shadow "org.apache.fory:fory-core:${project.fory_version}"

@@ -8,11 +8,18 @@ import me.mrnavastar.protoweaver.api.protocol.Protocol;
 import me.mrnavastar.protoweaver.api.protocol.Side;
 import me.mrnavastar.protoweaver.core.util.ProtoConstants;
 
+import java.util.concurrent.CountDownLatch;
+
 public class ClientConnectionHandler extends InternalConnectionHandler implements ProtoConnectionHandler {
 
     private Protocol protocol;
     private boolean authenticated = false;
     private ClientAuthHandler authHandler = null;
+    private final CountDownLatch ready = new CountDownLatch(1);
+
+    public void awaitReady() throws InterruptedException {
+        ready.await();
+    }
 
     public void start(ProtoConnection connection, Protocol protocol) {
         this.protocol = protocol;
@@ -50,6 +57,7 @@ public class ClientConnectionHandler extends InternalConnectionHandler implement
                         return;
                     }
                     connection.upgradeProtocol(protocol);
+                    ready.countDown();
                     protocol.logInfo("Connected to: " + connection.getRemoteAddress());
                 }
             }
@@ -65,7 +73,13 @@ public class ClientConnectionHandler extends InternalConnectionHandler implement
                         connection.disconnect();
                         return;
                     }
-                    connection.send(authHandler.getSecret());
+                    byte[] secret = authHandler.getSecret();
+                    if (secret == null) {
+                        protocol.logErr("Client authentication secret is missing. Closing connection");
+                        connection.disconnect();
+                        return;
+                    }
+                    connection.send(secret);
                 }
                 case DENIED -> {
                     protocol.logErr("Denied access by server at: " + connection.getRemoteAddress());
@@ -77,6 +91,7 @@ public class ClientConnectionHandler extends InternalConnectionHandler implement
 
     @Override
     public void onDisconnect(ProtoConnection connection) {
-        if (wasUpgraded(connection)) protocol.logInfo("Disconnected from: " + connection.getRemoteAddress());
+        ready.countDown();
+        if (protocol != null) protocol.logInfo("Disconnected from: " + connection.getRemoteAddress());
     }
 }

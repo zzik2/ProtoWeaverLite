@@ -28,8 +28,6 @@ public class SSLContext {
 
     @Getter
     private static io.netty.handler.ssl.SslContext context;
-    private static InputStream privateKey;
-    private static InputStream cert;
     private static final Provider provider = new BouncyCastleProvider();
 
     // These https://wiki.mozilla.org/Security/Server_Side_TLS#Intermediate_compatibility_.28recommended.29
@@ -50,33 +48,35 @@ public class SSLContext {
     public static void init(String dir) {
         Security.addProvider(provider);
 
-        Optional.ofNullable(System.getenv("PROTOWEAVER_PRIVATE_KEY")).ifPresent(value -> privateKey = new ByteArrayInputStream(value.getBytes(StandardCharsets.UTF_8)));
-        Optional.ofNullable(System.getenv("PROTOWEAVER_CERT")).ifPresent(value -> cert = new ByteArrayInputStream(value.getBytes(StandardCharsets.UTF_8)));
+        String keyValue = System.getenv("PROTOWEAVER_PRIVATE_KEY");
+        String certValue = System.getenv("PROTOWEAVER_CERT");
+        boolean environmentKeys = keyValue != null && certValue != null;
+        if (!environmentKeys) genKeys(dir);
 
-        genKeys(dir);
-        context = SslContextBuilder.forServer(cert, privateKey)
-                .sslProvider(OpenSsl.isAvailable() ? SslProvider.OPENSSL : SslProvider.JDK)
-                .ciphers(CIPHERS, SupportedCipherSuiteFilter.INSTANCE)
-                .applicationProtocolConfig(new ApplicationProtocolConfig(
-                        ApplicationProtocolConfig.Protocol.ALPN,
-                        ApplicationProtocolConfig.SelectorFailureBehavior.NO_ADVERTISE,
-                        ApplicationProtocolConfig.SelectedListenerFailureBehavior.ACCEPT,
-                        ApplicationProtocolNames.HTTP_2)
-                ).build();
+        try (InputStream privateKey = environmentKeys ? new ByteArrayInputStream(keyValue.getBytes(StandardCharsets.UTF_8)) : new FileInputStream(new File(dir, "private.pem"));
+             InputStream cert = environmentKeys ? new ByteArrayInputStream(certValue.getBytes(StandardCharsets.UTF_8)) : new FileInputStream(new File(dir, "cert.pem"))) {
+            context = SslContextBuilder.forServer(cert, privateKey)
+                    .sslProvider(OpenSsl.isAvailable() ? SslProvider.OPENSSL : SslProvider.JDK)
+                    .ciphers(CIPHERS, SupportedCipherSuiteFilter.INSTANCE)
+                    .applicationProtocolConfig(new ApplicationProtocolConfig(
+                            ApplicationProtocolConfig.Protocol.ALPN,
+                            ApplicationProtocolConfig.SelectorFailureBehavior.NO_ADVERTISE,
+                            ApplicationProtocolConfig.SelectedListenerFailureBehavior.ACCEPT,
+                            ApplicationProtocolNames.HTTP_2)
+                    ).build();
+        }
     }
 
     private static void genKeys(String dir) throws NoSuchAlgorithmException, CertificateException, IOException, OperatorCreationException {
-        if (privateKey != null && cert != null) return;
-
-        KeyPairGenerator kpg = KeyPairGenerator.getInstance("RSA");
-        kpg.initialize(2048);
-        KeyPair kp = kpg.generateKeyPair();
-        X509Certificate certificate = genCert(kp);
-
         File privateKeyFile = new File(dir + "/private.pem");
         File certFile = new File(dir + "/cert.pem");
 
         if (!privateKeyFile.exists() || !certFile.exists()) {
+            KeyPairGenerator kpg = KeyPairGenerator.getInstance("RSA");
+            kpg.initialize(2048);
+            KeyPair kp = kpg.generateKeyPair();
+            X509Certificate certificate = genCert(kp);
+
             ProtoLogger.info("Generating SSL Keys");
             privateKeyFile.getParentFile().mkdirs();
 
@@ -85,9 +85,6 @@ public class SSLContext {
             privateWriter.writeObject(kp.getPrivate());
             certWriter.writeObject(certificate);
         }
-
-        privateKey = new FileInputStream(privateKeyFile);
-        cert = new FileInputStream(certFile);
     }
 
     // From https://stackoverflow.com/questions/29852290/self-signed-x509-certificate-with-bouncy-castle-in-java

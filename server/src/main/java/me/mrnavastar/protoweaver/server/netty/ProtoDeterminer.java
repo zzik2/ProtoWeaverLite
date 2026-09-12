@@ -17,7 +17,7 @@ import me.mrnavastar.protoweaver.core.util.ProtoLogger;
 import java.util.List;
 import java.util.Map;
 
-public class  ProtoDeterminer extends ByteToMessageDecoder {
+public class ProtoDeterminer extends ByteToMessageDecoder {
 
     private final boolean sslEnabled;
 
@@ -74,7 +74,7 @@ public class  ProtoDeterminer extends ByteToMessageDecoder {
             }
 
             new ProtoConnection(InternalConnectionHandler.getProtocol(), Side.SERVER, ctx.channel());
-            buf.readerIndex(2);
+            buf.skipBytes(2);
             pipeline.remove(this);
             return;
         }

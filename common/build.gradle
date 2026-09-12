@@ -1,0 +1,19 @@
+def generateProtoConstants = tasks.register("generateProtoConstants", Sync) {
+    def projectVersion = project.version.toString()
+    inputs.property("projectVersion", projectVersion)
+
+    from("src/main/templates") {
+        expand(projectVersion: projectVersion) {
+            escapeBackslash = true
+        }
+    }
+    into(layout.buildDirectory.dir("generated/sources/protoConstants/java"))
+    filteringCharset = "UTF-8"
+}
+
+sourceSets.main.java.srcDir(generateProtoConstants)
+
+tasks.named("test") {
+    // The internal protocol and its loading callbacks must start fresh for each test class.
+    forkEvery = 1
+}

@@ -1,12 +1,37 @@
+import com.github.jengelman.gradle.plugins.shadow.tasks.ShadowJar
+
 plugins {
+    id "base"
     id "com.gradleup.shadow" version "9.6.1"
     id "io.freefair.lombok" version "9.5.0"
     id "maven-publish"
 }
 
+configurations {
+    merged {
+        canBeConsumed = false
+        canBeResolved = true
+    }
+    mergedDependencies {
+        canBeConsumed = false
+        canBeResolved = true
+        extendsFrom merged
+    }
+}
+
+dependencies {
+    merged "me.mrnavastar:r:${project.r_version}"
+    mergedDependencies "org.apache.fory:fory-core:${project.fory_version}"
+    mergedDependencies "io.netty:netty-buffer:${project.netty_version}"
+    mergedDependencies "io.netty:netty-transport:${project.netty_version}"
+    mergedDependencies "io.netty:netty-handler:${project.netty_version}"
+    mergedDependencies "io.netty:netty-codec:${project.netty_version}"
+    mergedDependencies "org.bouncycastle:bcpkix-jdk18on:${project.bouncy_version}"
+}
+
 allprojects {
-    version = project.project_version
-    group = project.maven_group
+    version = providers.gradleProperty("version").getOrElse(project.project_version)
+    group = providers.gradleProperty("group").getOrElse(project.maven_group)
 
     repositories {
         mavenCentral()
@@ -25,11 +50,16 @@ subprojects {
     apply plugin: "maven-publish"
     apply plugin: "io.freefair.lombok"
 
+    configurations.testImplementation.extendsFrom(configurations.compileOnly)
+
     dependencies {
+        testImplementation "junit:junit:4.13.2"
+
         compileOnly "org.apache.fory:fory-core:${project.fory_version}"
         compileOnly "io.netty:netty-buffer:${project.netty_version}"
         compileOnly "io.netty:netty-transport:${project.netty_version}"
         compileOnly "io.netty:netty-handler:${project.netty_version}"
+        compileOnly "io.netty:netty-codec:${project.netty_version}"
         compileOnly "org.bouncycastle:bcpkix-jdk18on:${project.bouncy_version}"
         compileOnly "me.mrnavastar:r:${project.r_version}"
 
@@ -65,6 +95,59 @@ subprojects {
                 from components.java
                 artifact tasks.jarSources
             }
+        }
+    }
+}
+
+def mergedShadowJar = tasks.register("mergedShadowJar", ShadowJar) {
+    description = "Combines common, client, and server with all runtime dependencies shaded."
+    archiveClassifier = "all"
+    configurations = [project.configurations.mergedDependencies]
+
+    ["org.apache.fory", "io.netty", "org.bouncycastle", "org.codehaus"].each { packageName ->
+        relocate packageName, "me.mrnavastar.protoweaver.libs.${packageName}"
+    }
+}
+
+def mergedJar = tasks.register("mergedJar", ShadowJar) {
+    description = "Combines common, client, and server with only R shaded."
+    archiveClassifier = "slim"
+    configurations = [project.configurations.merged]
+}
+
+[mergedShadowJar, mergedJar].each { jarTask ->
+    jarTask.configure {
+        archiveBaseName = project.archives_base_name
+        archiveVersion = project.version.toString()
+        destinationDirectory = layout.buildDirectory.dir("libs")
+
+        from project(":common").sourceSets.main.output
+        from project(":client").sourceSets.main.output
+        from project(":server").sourceSets.main.output
+
+        relocate "me.mrnavastar.r", "me.mrnavastar.protoweaver.libs.me.mrnavastar.r"
+
+        duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+        filesMatching("META-INF/services/**") {
+            duplicatesStrategy = DuplicatesStrategy.INCLUDE
+        }
+        mergeServiceFiles()
+
+        exclude "META-INF/*.SF", "META-INF/*.DSA", "META-INF/*.RSA", "META-INF/SIG-*"
+        exclude "META-INF/INDEX.LIST", "module-info.class", "META-INF/versions/**/module-info.class"
+    }
+}
+
+tasks.named("assemble") {
+    dependsOn mergedJar, mergedShadowJar
+}
+
+publishing {
+    publications {
+        merged(MavenPublication) {
+            artifactId = "ProtoWeaverLite"
+            artifact mergedJar
+            artifact mergedShadowJar
         }
     }
 }

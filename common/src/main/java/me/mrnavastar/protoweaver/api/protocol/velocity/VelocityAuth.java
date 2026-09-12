@@ -12,7 +12,7 @@ import java.io.File;
 import java.io.FileReader;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
-import java.util.Arrays;
+import java.security.MessageDigest;
 
 @Getter
 public class VelocityAuth implements ServerAuthHandler, ClientAuthHandler {
@@ -22,7 +22,8 @@ public class VelocityAuth implements ServerAuthHandler, ClientAuthHandler {
 
     @Override
     public boolean handleAuth(ProtoConnection connection, byte[] key) {
-        return Arrays.equals(key, secret);
+        byte[] expected = secret;
+        return expected != null && key != null && MessageDigest.isEqual(key, expected);
     }
 
     @Override

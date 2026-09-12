@@ -31,6 +31,45 @@ Protoweaver is fast, secure, and easy to use. All protocols run under the same n
 - [ ] Muti-protocol connections
 - [ ] Tell me what you want to see!
 
+### Combined JARs
+
+Both tasks combine the classes and resources from `common`, `client`, and `server` into one JAR:
+
+| Command (Windows) | Output in `build/libs/` | Bundled dependencies |
+| --- | --- | --- |
+| `.\gradlew.bat :mergedShadowJar` | `protoweaver-<version>-all.jar` | All runtime dependencies, including transitive dependencies, with relocated packages |
+| `.\gradlew.bat :mergedJar` | `protoweaver-<version>-slim.jar` | Only R, with its package relocated |
+
+The slim JAR requires Fory, Netty, Bouncy Castle, and their runtime dependencies on the application's classpath. Dependency versions are defined in `gradle.properties`.
+
+#### JitPack
+
+JitPack uses JDK 21 to run Gradle; the compiled library still targets Java 17. The build publishes both combined JARs under `com.github.zzik2:ProtoWeaverLite:<tag>`, with the `slim` and `all` classifiers.
+
+```gradle
+repositories {
+    mavenCentral()
+    maven { url "https://jitpack.io" }
+}
+
+dependencies {
+    implementation "com.github.zzik2:ProtoWeaverLite:<tag>:all"
+    // Or use :slim when the application supplies the external dependencies.
+}
+```
+
+Choose one classifier. The shared POM does not declare external dependencies, so the slim variant requires the dependencies listed above to be provided separately.
+
+Commit these build settings and use a new tag containing them (or its commit hash) as `<tag>`. Existing tags pointing to earlier commits do not include the JitPack configuration.
+
+To verify the combined publication locally on Windows with JDK 21:
+
+```powershell
+.\gradlew.bat clean build :publishToMavenLocal "-Pgroup=com.github.zzik2" "-Pversion=local-test"
+```
+
+`build` also creates both combined JARs in `build/libs/`. The leading `:` in `:publishToMavenLocal` selects only the root combined publication, which JitPack collects from the local Maven repository.
+
 ### Project Setup
 In your build.gradle include
 

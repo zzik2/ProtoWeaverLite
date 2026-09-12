@@ -16,6 +16,8 @@ import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.logging.Level;
 
 /**
@@ -27,6 +29,7 @@ public class Protocol {
     @EqualsAndHashCode.Exclude
     private final ObjectSerializer serializer = new ObjectSerializer();
     private final MessageDigest packetMD = MessageDigest.getInstance("SHA-1");
+    private final Set<Class<?>> packets = new HashSet<>();
 
     @Getter private final String namespace;
     @Getter private final String name;
@@ -215,7 +218,9 @@ public class Protocol {
          * @param packet The packet to register.
          */
         public Builder addPacket(@NonNull Class<?> packet) {
+            if (protocol.packets.contains(packet)) return this;
             protocol.serializer.register(packet);
+            protocol.packets.add(packet);
             protocol.packetMD.update(packet.getName().getBytes(StandardCharsets.UTF_8));
             return this;
         }
@@ -227,7 +232,9 @@ public class Protocol {
          */
         @SneakyThrows
         public <T> Builder addPacket(@NonNull Class<T> packet, @NonNull Class<? extends ProtoSerializer<T>> serializer, Object... args) {
+            if (protocol.packets.contains(packet)) return this;
             protocol.serializer.register(packet, serializer.getDeclaredConstructor(getArgTypes(args)).newInstance(args));
+            protocol.packets.add(packet);
             protocol.packetMD.update(packet.getName().getBytes(StandardCharsets.UTF_8));
             return this;
         }

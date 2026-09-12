@@ -24,6 +24,8 @@ public class ServerConnectionHandler extends InternalConnectionHandler implement
         if (packet instanceof ProtocolStatus status) {
             switch (status.getStatus()) {
                 case START -> {
+                    authenticated = false;
+                    authHandler = null;
                     // Check if protocol loaded
                     nextProtocol = ProtoWeaver.getLoadedProtocol(status.getNextProtocol());
                     if (nextProtocol == null) {
@@ -59,14 +61,15 @@ public class ServerConnectionHandler extends InternalConnectionHandler implement
                     authenticated = true;
                 }
                 case MISSING -> {
-                    nextProtocol.logErr("Protocol is not loaded on client!");
+                    protocol.logErr("Protocol is not loaded on client!");
                     disconnectIfNeverUpgraded(connection);
+                    return;
                 }
             }
         }
 
         // Authenticate client
-        if (nextProtocol != null && packet instanceof byte[] secret) {
+        if (authHandler != null && packet instanceof byte[] secret) {
             authenticated = authHandler.handleAuth(connection, secret);
         }
 
@@ -76,11 +79,25 @@ public class ServerConnectionHandler extends InternalConnectionHandler implement
             return;
         }
 
-        // Upgrade protocol
-        connection.send(AuthStatus.OK);
-        connection.send(new ProtocolStatus(connection.getProtocol().toString(), nextProtocol.toString(), new byte[]{}, ProtocolStatus.Status.UPGRADE));
         connection.upgradeProtocol(nextProtocol);
-        nextProtocol.logInfo("Connected to: " + connection.getRemoteAddress());
+        if (connection.isOpen() && connection.getProtocol() == nextProtocol) {
+            nextProtocol.logInfo("Connected to: " + connection.getRemoteAddress());
+        }
+    }
+
+    /**
+     * Called by ProtoConnection while holding the target protocol's monitor, before changing the connection state.
+     */
+    public boolean confirmUpgrade(ProtoConnection connection, Protocol targetProtocol) {
+        if (targetProtocol.getMaxConnections() != -1 && targetProtocol.getConnections() >= targetProtocol.getMaxConnections()) {
+            Sender sender = connection.send(new ProtocolStatus(connection.getProtocol().toString(), targetProtocol.toString(), new byte[0], ProtocolStatus.Status.FULL));
+            disconnectIfNeverUpgraded(connection, sender);
+            return false;
+        }
+
+        connection.send(AuthStatus.OK);
+        connection.send(new ProtocolStatus(connection.getProtocol().toString(), targetProtocol.toString(), new byte[0], ProtocolStatus.Status.UPGRADE));
+        return true;
     }
 
     @Override

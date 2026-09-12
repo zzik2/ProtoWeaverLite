@@ -23,16 +23,10 @@ import me.mrnavastar.protoweaver.core.protocol.protoweaver.InternalConnectionHan
 
 import javax.net.ssl.SSLException;
 import java.net.InetSocketAddress;
-import java.util.ArrayList;
-
-import com.google.common.base.internal.Finalizer;
+import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 public class ProtoClient {
-
-    static {
-        // This exists so shadow jar does not yeet it
-        Class<?> c = Finalizer.class;
-    }
 
     @FunctionalInterface
     public interface ConnectionEventHandler {
@@ -43,17 +37,18 @@ public class ProtoClient {
     private final InetSocketAddress address;
     private EventLoopGroup workerGroup = null;
     @Getter
-    private ProtoConnection connection = null;
+    private volatile ProtoConnection connection = null;
     private final SslContext sslContext;
     private final ProtoTrustManager trustManager;
-    private final ArrayList<ConnectionEventHandler> connectionEstablishedHandlers = new ArrayList<>();
-    private final ArrayList<ConnectionEventHandler> connectionLostHandlers = new ArrayList<>();
+    private final List<ConnectionEventHandler> connectionEstablishedHandlers = new CopyOnWriteArrayList<>();
+    private final List<ConnectionEventHandler> connectionLostHandlers = new CopyOnWriteArrayList<>();
 
     public ProtoClient(@NonNull InetSocketAddress address, @NonNull String hostsFile) {
         try {
             this.address = address;
             trustManager = new ProtoTrustManager(address.getHostName(), address.getPort(), hostsFile);
-            this.sslContext = SslContextBuilder.forClient().trustManager(trustManager).build();
+            // Server identity is verified by its saved fingerprint, not the self-signed certificate's hostname.
+            this.sslContext = SslContextBuilder.forClient().trustManager(trustManager).endpointIdentificationAlgorithm(null).build();
         } catch (SSLException e) {
             throw new RuntimeException(e);
         }
@@ -71,12 +66,14 @@ public class ProtoClient {
         this(host, port, ".");
     }
 
-    public ProtoClient connect(@NonNull Protocol protocol) {
+    public synchronized ProtoClient connect(@NonNull Protocol protocol) {
+        if (workerGroup != null) throw new IllegalStateException("Client is already connecting or connected");
         ProtoWeaver.load(protocol);
 
         Bootstrap b = new Bootstrap();
-        workerGroup = new NioEventLoopGroup();
-        b.group(workerGroup);
+        EventLoopGroup group = new NioEventLoopGroup(1);
+        workerGroup = group;
+        b.group(group);
         b.channel(NioSocketChannel.class);
         b.option(ChannelOption.SO_KEEPALIVE, true);
         b.option(ChannelOption.TCP_NODELAY, true);
@@ -90,46 +87,55 @@ public class ProtoClient {
 
         ChannelFuture f = b.connect(address);
         new Thread(() -> {
+            ProtoConnection activeConnection = null;
             try {
                 f.awaitUninterruptibly();
-                if (f.isSuccess()) {
-                    ((ClientConnectionHandler) connection.getHandler()).start(connection, protocol);
-                    // Wait for protocol to switch to passed in one
-                    while (connection == null || connection.isOpen() && !connection.getProtocol().toString().equals(protocol.toString()))
-                        Thread.onSpinWait();
+                activeConnection = connection;
+                if (f.isSuccess() && activeConnection != null) {
+                    ClientConnectionHandler handshake = (ClientConnectionHandler) activeConnection.getHandler();
+                    handshake.start(activeConnection, protocol);
+                    handshake.awaitReady();
 
-                    if (connection.isOpen()) connectionEstablishedHandlers.forEach(handler -> {
-                        try {
-                            handler.handle(connection);
-                        } catch (Exception e) {
-                            throw new RuntimeException(e);
+                    if (activeConnection.isOpen() && activeConnection.getProtocol().toString().equals(protocol.toString())) {
+                        for (ConnectionEventHandler handler : connectionEstablishedHandlers) {
+                            handler.handle(activeConnection);
                         }
-                    });
+                    }
                 }
 
                 f.channel().closeFuture().sync();
-                connectionLostHandlers.forEach(handler -> {
-                    try {
-                        handler.handle(connection);
-                    } catch (Exception e) {
-                        throw new RuntimeException(e);
-                    }
-                });
-                connection = null;
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
             } catch (Exception e) {
-                throw new RuntimeException(e);
+                protocol.logErr("Connection failed: " + e);
             } finally {
-                disconnect();
+                f.channel().close();
+                group.shutdownGracefully();
+                synchronized (this) {
+                    if (workerGroup == group) {
+                        connection = null;
+                        workerGroup = null;
+                    }
+                }
+                for (ConnectionEventHandler handler : connectionLostHandlers) {
+                    try {
+                        handler.handle(activeConnection);
+                    } catch (Exception e) {
+                        protocol.logErr("Connection lost handler failed: " + e);
+                    }
+                }
             }
-        }).start();
+        }, "protoweaver-client-" + address).start();
         return this;
     }
 
     public boolean isConnected() {
-        return !workerGroup.isShutdown() || !workerGroup.isShuttingDown() || connection != null && connection.isOpen();
+        ProtoConnection activeConnection = connection;
+        return activeConnection != null && activeConnection.isOpen()
+                && activeConnection.getProtocol() != InternalConnectionHandler.getProtocol();
     }
 
-    public void disconnect() {
+    public synchronized void disconnect() {
         if (connection != null) connection.disconnect();
         if (workerGroup != null && !workerGroup.isShutdown()) workerGroup.shutdownGracefully();
     }
@@ -150,11 +156,13 @@ public class ProtoClient {
     }
 
     public Sender send(@NonNull Object packet) {
-        if (connection != null) return connection.send(packet);
+        ProtoConnection activeConnection = connection;
+        if (activeConnection != null && activeConnection.isOpen()) return activeConnection.send(packet);
         return Sender.NULL;
     }
 
     public Protocol getCurrentProtocol() {
-        return connection == null ? null : connection.getProtocol();
+        ProtoConnection activeConnection = connection;
+        return activeConnection == null ? null : activeConnection.getProtocol();
     }
 }

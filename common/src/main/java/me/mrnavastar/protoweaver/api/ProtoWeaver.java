@@ -4,7 +4,6 @@ import lombok.NonNull;
 import me.mrnavastar.protoweaver.api.protocol.Protocol;
 import me.mrnavastar.protoweaver.api.util.Event;
 
-import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -20,9 +19,9 @@ public class ProtoWeaver {
 
         Event.Cancelable cancelable = new Event.Cancelable();
         PRE_PROTOCOL_LOADED.getInvoker().trigger(protocol, cancelable);
-        if (cancelable.isCanceled()) return;
+        if (cancelable.isCanceled() && !protocol.toString().equals("protoweaver:internal")) return;
 
-        loadedProtocols.put(protocol.toString(), protocol);
+        if (loadedProtocols.putIfAbsent(protocol.toString(), protocol) != null) return;
         PROTOCOL_LOADED.getInvoker().trigger(protocol);
     }
 
@@ -60,7 +59,7 @@ public class ProtoWeaver {
      */
     public static final Event<PreLoadedProtocol> PRE_PROTOCOL_LOADED = new Event<>(callbacks -> (protocol, cancelable) -> {
         for (PreLoadedProtocol callback : callbacks) {
-            if (cancelable.isCanceled() && !protocol.getNamespace().equals("protoweaver") && !protocol.getName().equals("internal")) break;
+            if (cancelable.isCanceled() && !protocol.toString().equals("protoweaver:internal")) break;
             callback.trigger(protocol, cancelable);
         }
     });
