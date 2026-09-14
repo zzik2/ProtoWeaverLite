@@ -6,11 +6,16 @@ import lombok.Getter;
 import lombok.SneakyThrows;
 import me.mrnavastar.protoweaver.core.util.ProtoLogger;
 import org.bouncycastle.asn1.ASN1ObjectIdentifier;
+import org.bouncycastle.asn1.pkcs.PrivateKeyInfo;
 import org.bouncycastle.asn1.x500.X500Name;
 import org.bouncycastle.asn1.x509.BasicConstraints;
+import org.bouncycastle.cert.X509CertificateHolder;
 import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter;
 import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
+import org.bouncycastle.openssl.PEMKeyPair;
+import org.bouncycastle.openssl.PEMParser;
+import org.bouncycastle.openssl.jcajce.JcaPEMKeyConverter;
 import org.bouncycastle.openssl.jcajce.JcaPEMWriter;
 import org.bouncycastle.operator.ContentSigner;
 import org.bouncycastle.operator.OperatorCreationException;
@@ -46,8 +51,6 @@ public class SSLContext {
 
     @SneakyThrows
     public static void init(String dir) {
-        Security.addProvider(provider);
-
         String keyValue = System.getenv("PROTOWEAVER_PRIVATE_KEY");
         String certValue = System.getenv("PROTOWEAVER_CERT");
         boolean environmentKeys = keyValue != null && certValue != null;
@@ -55,7 +58,7 @@ public class SSLContext {
 
         try (InputStream privateKey = environmentKeys ? new ByteArrayInputStream(keyValue.getBytes(StandardCharsets.UTF_8)) : new FileInputStream(new File(dir, "private.pem"));
              InputStream cert = environmentKeys ? new ByteArrayInputStream(certValue.getBytes(StandardCharsets.UTF_8)) : new FileInputStream(new File(dir, "cert.pem"))) {
-            context = SslContextBuilder.forServer(cert, privateKey)
+            context = SslContextBuilder.forServer(readPrivateKey(privateKey), readCertificates(cert))
                     .sslProvider(OpenSsl.isAvailable() ? SslProvider.OPENSSL : SslProvider.JDK)
                     .ciphers(CIPHERS, SupportedCipherSuiteFilter.INSTANCE)
                     .applicationProtocolConfig(new ApplicationProtocolConfig(
@@ -87,6 +90,31 @@ public class SSLContext {
         }
     }
 
+    private static PrivateKey readPrivateKey(InputStream input) throws IOException {
+        JcaPEMKeyConverter converter = new JcaPEMKeyConverter().setProvider(provider);
+        try (PEMParser parser = new PEMParser(new InputStreamReader(input, StandardCharsets.US_ASCII))) {
+            Object value;
+            while ((value = parser.readObject()) != null) {
+                if (value instanceof PEMKeyPair pair) return converter.getKeyPair(pair).getPrivate();
+                if (value instanceof PrivateKeyInfo key) return converter.getPrivateKey(key);
+            }
+        }
+        throw new IOException("No unencrypted private key found in PEM input");
+    }
+
+    private static X509Certificate[] readCertificates(InputStream input) throws IOException, CertificateException {
+        List<X509Certificate> certificates = new ArrayList<>();
+        JcaX509CertificateConverter converter = new JcaX509CertificateConverter().setProvider(provider);
+        try (PEMParser parser = new PEMParser(new InputStreamReader(input, StandardCharsets.US_ASCII))) {
+            Object value;
+            while ((value = parser.readObject()) != null) {
+                if (value instanceof X509CertificateHolder certificate) certificates.add(converter.getCertificate(certificate));
+            }
+        }
+        if (certificates.isEmpty()) throw new CertificateException("No X.509 certificates found in PEM input");
+        return certificates.toArray(X509Certificate[]::new);
+    }
+
     // From https://stackoverflow.com/questions/29852290/self-signed-x509-certificate-with-bouncy-castle-in-java
     private static X509Certificate genCert(KeyPair keyPair) throws OperatorCreationException, CertificateException, IOException {
         long now = System.currentTimeMillis();
@@ -97,7 +125,7 @@ public class SSLContext {
         Date endDate = calendar.getTime();
 
         X500Name dnName = new X500Name("CN=PROTOWEAVER");
-        ContentSigner contentSigner = new JcaContentSignerBuilder("SHA256WithRSA").build(keyPair.getPrivate());
+        ContentSigner contentSigner = new JcaContentSignerBuilder("SHA256WithRSA").setProvider(provider).build(keyPair.getPrivate());
         JcaX509v3CertificateBuilder certBuilder = new JcaX509v3CertificateBuilder(dnName, new BigInteger(Long.toString(now)), startDate, endDate, dnName, keyPair.getPublic());
         certBuilder.addExtension(new ASN1ObjectIdentifier("2.5.29.19"), true, new BasicConstraints(true));
 

@@ -21,6 +21,7 @@ import me.mrnavastar.protoweaver.core.protocol.protoweaver.AuthStatus;
 import me.mrnavastar.protoweaver.core.protocol.protoweaver.ClientConnectionHandler;
 import me.mrnavastar.protoweaver.core.protocol.protoweaver.InternalConnectionHandler;
 import me.mrnavastar.protoweaver.core.protocol.protoweaver.ProtocolStatus;
+import me.mrnavastar.protoweaver.core.util.ProtoLogger;
 import me.mrnavastar.protoweaver.server.netty.ProtoDeterminer;
 import me.mrnavastar.protoweaver.server.netty.SSLContext;
 import org.junit.Rule;
@@ -29,8 +30,12 @@ import org.junit.rules.TemporaryFolder;
 
 import java.io.InputStream;
 import java.net.InetSocketAddress;
+import java.net.URL;
+import java.net.URLClassLoader;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.Provider;
+import java.security.Security;
 import java.security.cert.CertificateFactory;
 import java.security.cert.CertificateException;
 import java.security.cert.X509Certificate;
@@ -41,6 +46,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Stream;
 
 import static org.junit.Assert.*;
 
@@ -177,6 +183,34 @@ public class TransportTest {
             response.release();
         } finally {
             channel.finishAndReleaseAll();
+        }
+    }
+
+    @Test
+    public void initializesTlsWhenNettyCannotSeePluginBouncyCastle() throws Exception {
+        URL[] netty = Stream.of(io.netty.handler.ssl.SslContext.class, ByteBuf.class, Channel.class,
+                        io.netty.util.ReferenceCountUtil.class, io.netty.handler.codec.ByteToMessageDecoder.class, io.netty.resolver.AddressResolver.class)
+                .map(type -> type.getProtectionDomain().getCodeSource().getLocation()).distinct().toArray(URL[]::new);
+        URL[] plugin = Stream.of(SSLContext.class, ProtoLogger.class, org.bouncycastle.openssl.PEMParser.class,
+                        org.bouncycastle.jce.provider.BouncyCastleProvider.class, org.bouncycastle.asn1.cms.ContentInfo.class)
+                .map(type -> type.getProtectionDomain().getCodeSource().getLocation()).distinct().toArray(URL[]::new);
+        Provider previous = Security.getProvider("BC");
+        try (URLClassLoader host = new URLClassLoader(netty, ClassLoader.getPlatformClassLoader());
+             URLClassLoader isolated = new URLClassLoader(plugin, host)) {
+            assertThrows(ClassNotFoundException.class, () -> host.loadClass("org.bouncycastle.openssl.PEMParser"));
+            assertSame(isolated, isolated.loadClass("org.bouncycastle.openssl.PEMParser").getClassLoader());
+            assertSame(host, isolated.loadClass("io.netty.handler.ssl.SslContextBuilder").getClassLoader());
+
+            Class<?> ssl = isolated.loadClass(SSLContext.class.getName());
+            ssl.getMethod("init", String.class).invoke(null, temporary.newFolder("split-loader-tls").getPath());
+
+            assertNotNull(ssl.getMethod("getContext").invoke(null));
+            assertSame(previous, Security.getProvider("BC"));
+        } finally {
+            if (Security.getProvider("BC") != previous) {
+                Security.removeProvider("BC");
+                if (previous != null) Security.addProvider(previous);
+            }
         }
     }
 
